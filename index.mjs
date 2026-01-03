@@ -328,3 +328,78 @@ bot.launch()
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
+
+bot.command('help', async (ctx) => {
+  const lines = [
+    "Watson is an opt-in archivist. He speaks only when requested (or when /observe is enabled).",
+    "",
+    "Commands:",
+    "- /rules — what Watson is and is not",
+    "- /summary — short ledger of recent activity",
+    "- /catchup — smirking digest of backlog window",
+    "- /audit — random Exhibit Audit (logic + form, harmless)",
+    "- /looseends — unclaimed next steps",
+    "- /decisions — commitments that actually attached",
+    "- /observe — rare automatic summaries (quiet mode)",
+    "- /silence — disables observe mode",
+    "",
+    "Watson does not name people. He reports signals."
+  ];
+  return ctx.reply(lines.join("\n"));
+});
+////////////////////////////////////////////////////////////////////////////////
+// WATSON_CAPABILITY_NUDGE
+// - Only active when /observe is enabled (opt-in)
+// - Max once per week per chat
+// - Quiet hours respected (uses _isQuietHours if present)
+// - Low activity gate to avoid random interruptions
+////////////////////////////////////////////////////////////////////////////////
+
+const _capNudgeByChat = new Map(); // chatId -> lastNudgeAt ms
+
+function _capNudgeText() {
+  const variants = [
+    "Reminder: the archive remains available. /summary /catchup /audit /looseends /decisions /help",
+    "Capabilities persist. When ready: /summary, /catchup, /audit, /looseends, /decisions, /help",
+    "Watson notes: tools exist. Use at will: /summary /catchup /audit /looseends /decisions /help",
+    "If needed: /summary for ledger, /catchup for digest, /audit for Exhibit Audit. Others remain on file."
+  ];
+  return variants[Math.floor(Math.random() * variants.length)];
+}
+
+bot.use(async (ctx, next) => {
+  await next();
+
+  const chatId = String(ctx.chat?.id ?? "");
+  const text = ctx.message?.text ?? "";
+  const isCmd = typeof text === "string" && text.trim().startsWith("/");
+
+  // Only consider nudges on normal messages
+  if (isCmd) return;
+
+  // Only when observe is enabled (guardrails map)
+  try {
+    if (typeof _observeByChat === "undefined") return;
+    const state = _observeByChat.get(chatId);
+    if (!state?.enabled) return;
+
+    // Respect quiet hours if helper exists
+    if (typeof _isQuietHours === "function" && _isQuietHours()) return;
+
+    const now = Date.now();
+    const last = _capNudgeByChat.get(chatId) || 0;
+
+    // Once per week max
+    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+    if (now - last < WEEK_MS) return;
+
+    // Require some activity since observe enabled
+    const since = state.sinceCount || 0;
+    if (since < 25) return;
+
+    await ctx.reply(_capNudgeText());
+    _capNudgeByChat.set(chatId, now);
+  } catch {
+    // fail closed: no spam
+  }
+});
