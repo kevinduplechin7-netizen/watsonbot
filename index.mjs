@@ -551,3 +551,4 @@ bot.command("decisions", async (ctx) => {
     return ctx.reply("Watson observes:\n- Decisions were requested.\n- The record declined comment. /help");
   }
 });
+
