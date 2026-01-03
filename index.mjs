@@ -5,7 +5,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Telegraf } from 'telegraf';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 
 import { loadState, saveState, getChatState } from './lib/state.mjs';
 import { appendMessage, readMessagesSince, readRecent } from './lib/store.mjs';
