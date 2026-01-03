@@ -8,6 +8,7 @@ import { Telegraf } from 'telegraf';
 import { loadState, saveState, getChatState } from './lib/state.mjs';
 import { appendMessage, readMessagesSince, readRecent } from './lib/store.mjs';
 import { buildCatchupDigest, buildSummaryDigest } from './lib/digest.mjs';
+import { buildLooseEndsDigest, buildDecisionsDigest } from './lib/extract.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +28,18 @@ if (!TELEGRAM_BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN in .env');
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
 
+
+bot.catch((err, ctx) => {
+  console.error('BOT_ERROR:', err);
+  try {
+    if (ctx && typeof ctx.reply === 'function') {
+      return ctx.reply('Watson observes:\n- A paperwork incident occurred.\n- The archive remains available. /help');
+    }
+  } catch {}
+});
+
+process.on('unhandledRejection', (err) => console.error('UNHANDLED_REJECTION:', err));
+process.on('uncaughtException', (err) => console.error('UNCAUGHT_EXCEPTION:', err));
 ////////////////////////////////////////////////////////////////////////////////
 // WATSON_PREMIUM_GUARDRAILS
 // - Rate limit command replies so Watson cannot be spammed.
@@ -321,6 +334,45 @@ bot.command('silence', async (ctx) => {
   return ctx.reply(buildSilence(msgs));
 });
 
+bot.command('looseends', async (ctx) => {
+  try {
+    const chatId = String(ctx.chat.id);
+
+    // Prefer existing readRecent if available; fall back to readMessagesSince
+    let msgs = [];
+    if (typeof readRecent === 'function') {
+      msgs = await readRecent(chatId, 200, { includeCommands: false });
+    } else if (typeof readMessagesSince === 'function') {
+      msgs = await readMessagesSince(chatId, 0, { limit: 2000, includeCommands: false });
+      msgs = msgs.slice(-200);
+    }
+
+    return ctx.reply(buildLooseEndsDigest(msgs));
+  } catch (err) {
+    console.error('LOOSEENDS_ERROR:', err);
+    return ctx.reply('Watson observes:\n- Loose ends were referenced.\n- Extraction failed quietly. /help');
+  }
+});
+
+bot.command('decisions', async (ctx) => {
+  try {
+    const chatId = String(ctx.chat.id);
+
+    let msgs = [];
+    if (typeof readRecent === 'function') {
+      msgs = await readRecent(chatId, 200, { includeCommands: false });
+    } else if (typeof readMessagesSince === 'function') {
+      msgs = await readMessagesSince(chatId, 0, { limit: 2000, includeCommands: false });
+      msgs = msgs.slice(-200);
+    }
+
+    return ctx.reply(buildDecisionsDigest(msgs));
+  } catch (err) {
+    console.error('DECISIONS_ERROR:', err);
+    return ctx.reply('Watson observes:\n- Decisions were requested.\n- The record declined to cooperate. /help');
+  }
+});
+
 bot.launch()
   .then(() => console.log('Watson is running (free mode, long polling).'))
   .catch((err) => console.error('Failed to launch Watson:', err));
@@ -403,3 +455,4 @@ bot.use(async (ctx, next) => {
     // fail closed: no spam
   }
 });
+
