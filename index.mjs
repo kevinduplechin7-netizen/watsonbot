@@ -1,4 +1,4 @@
-console.log('Watson (free mode) script started');
+﻿console.log('Watson (free mode) script started');
 
 import dotenv from 'dotenv';
 import path from 'path';
@@ -26,7 +26,128 @@ if (!TELEGRAM_BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN in .env');
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
-// ---------- state boot marker ----------
+
+////////////////////////////////////////////////////////////////////////////////
+// WATSON_PREMIUM_GUARDRAILS
+// - Rate limit command replies so Watson cannot be spammed.
+// - Implement quiet /observe so Watson appears rarely and only when helpful.
+// - Maintain per-chat template memory to reduce repetition.
+////////////////////////////////////////////////////////////////////////////////
+
+const _templateStateByChat = new Map();
+const _lastCommandReplyAt = new Map(); // key: chatId:command -> ms
+const _observeByChat = new Map(); // chatId -> { enabled, lastAutoAt, sinceCount }
+
+// Cooldowns (milliseconds)
+const _COOLDOWN_MS = {
+  summary: 60_000,
+  catchup: 120_000,
+  audit: 60_000,
+  looseends: 60_000,
+  decisions: 60_000
+};
+
+// Observe behavior: rare, not annoying
+const _OBSERVE_MIN_MESSAGES = 50;
+const _OBSERVE_MIN_MS = 4 * 60 * 60 * 1000; // four hours
+const _OBSERVE_QUIET_HOURS = { start: 22, end: 7 }; // ten pm to seven am (local)
+
+function _isQuietHours() {
+  const h = new Date().getHours();
+  // quiet if hour >= start OR hour < end
+  return (h >= _OBSERVE_QUIET_HOURS.start) || (h < _OBSERVE_QUIET_HOURS.end);
+}
+
+function _chatId(ctx) {
+  return String(ctx.chat?.id ?? "");
+}
+
+function _getTemplateState(chatId) {
+  if (!_templateStateByChat.has(chatId)) _templateStateByChat.set(chatId, {});
+  return _templateStateByChat.get(chatId);
+}
+
+function _cmdKey(chatId, cmd) {
+  return chatId + ":" + cmd;
+}
+
+function _tooSoon(chatId, cmd) {
+  const key = _cmdKey(chatId, cmd);
+  const last = _lastCommandReplyAt.get(key) || 0;
+  const now = Date.now();
+  const cooldown = _COOLDOWN_MS[cmd] || 0;
+  return (now - last) < cooldown;
+}
+
+function _stampCmd(chatId, cmd) {
+  _lastCommandReplyAt.set(_cmdKey(chatId, cmd), Date.now());
+}
+
+function _parseCommand(text) {
+  if (!text) return "";
+  const t = String(text).trim();
+  if (!t.startsWith("/")) return "";
+  return t.slice(1).split(/[ @\n\r\t]/)[0].toLowerCase();
+}
+
+// Middleware sits before command handlers.
+bot.use(async (ctx, next) => {
+  const chatId = _chatId(ctx);
+  const text = ctx.message?.text;
+
+  // Observe toggle interception (prevents duplicate handlers from being noisy)
+  const cmd = _parseCommand(text);
+  if (cmd === "observe") {
+    const state = _observeByChat.get(chatId) || { enabled: false, lastAutoAt: 0, sinceCount: 0 };
+    state.enabled = true;
+    state.sinceCount = 0;
+    _observeByChat.set(chatId, state);
+    return ctx.reply("Watson will observe quietly. Reports will be rare and optional.");
+  }
+  if (cmd === "silence") {
+    _observeByChat.set(chatId, { enabled: false, lastAutoAt: 0, sinceCount: 0 });
+    return ctx.reply("Watson will remain silent until requested.");
+  }
+
+  // Command cooldown (prevents overkill)
+  if (cmd && _COOLDOWN_MS[cmd]) {
+    if (_tooSoon(chatId, cmd)) {
+      return ctx.reply("Report recently filed. The archive requests a brief pause.");
+    }
+    _stampCmd(chatId, cmd);
+  }
+
+  // Let normal handlers run
+  await next();
+
+  // Quiet observe: after non-command messages only
+  if (!cmd) {
+    const state = _observeByChat.get(chatId);
+    if (state?.enabled) {
+      state.sinceCount = (state.sinceCount || 0) + 1;
+
+      const now = Date.now();
+      const enoughMsgs = state.sinceCount >= _OBSERVE_MIN_MESSAGES;
+      const enoughTime = (now - (state.lastAutoAt || 0)) >= _OBSERVE_MIN_MS;
+
+      if (enoughMsgs && enoughTime && !_isQuietHours()) {
+        try {
+          // Pull recent window and summarize. Keep it short.
+          const messages = await store.getRecent(chatId, 120);
+          const templateState = _getTemplateState(chatId);
+          const out = buildSummaryDigest(messages, { templateState });
+
+          await ctx.reply(out);
+          state.lastAutoAt = now;
+          state.sinceCount = 0;
+        } catch (e) {
+          // fail closed: do not spam errors into chat
+        }
+      }
+      _observeByChat.set(chatId, state);
+    }
+  }
+});// ---------- state boot marker ----------
 const state = loadState();
 const bootTs = Math.floor(Date.now() / 1000);
 
@@ -62,7 +183,7 @@ function line(...parts) {
 function clipQuote(s, maxLen) {
   const t = (s || '').replace(/\s+/g, ' ').trim();
   if (t.length <= maxLen) return t;
-  return t.slice(0, maxLen) + '…';
+  return t.slice(0, maxLen) + 'â€¦';
 }
 
 function findLastQuestionWithOutcome(messages) {
@@ -206,3 +327,4 @@ bot.launch()
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
