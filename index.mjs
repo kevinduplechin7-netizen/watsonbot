@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Telegraf } from 'telegraf';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import { loadState, saveState, getChatState } from './lib/state.mjs';
 import { appendMessage, readMessagesSince, readRecent } from './lib/store.mjs';
@@ -334,45 +336,6 @@ bot.command('silence', async (ctx) => {
   return ctx.reply(buildSilence(msgs));
 });
 
-bot.command('looseends', async (ctx) => {
-  try {
-    const chatId = String(ctx.chat.id);
-
-    // Prefer existing readRecent if available; fall back to readMessagesSince
-    let msgs = [];
-    if (typeof readRecent === 'function') {
-      msgs = await readRecent(chatId, 200, { includeCommands: false });
-    } else if (typeof readMessagesSince === 'function') {
-      msgs = await readMessagesSince(chatId, 0, { limit: 2000, includeCommands: false });
-      msgs = msgs.slice(-200);
-    }
-
-    return ctx.reply(buildLooseEndsDigest(msgs));
-  } catch (err) {
-    console.error('LOOSEENDS_ERROR:', err);
-    return ctx.reply('Watson observes:\n- Loose ends were referenced.\n- Extraction failed quietly. /help');
-  }
-});
-
-bot.command('decisions', async (ctx) => {
-  try {
-    const chatId = String(ctx.chat.id);
-
-    let msgs = [];
-    if (typeof readRecent === 'function') {
-      msgs = await readRecent(chatId, 200, { includeCommands: false });
-    } else if (typeof readMessagesSince === 'function') {
-      msgs = await readMessagesSince(chatId, 0, { limit: 2000, includeCommands: false });
-      msgs = msgs.slice(-200);
-    }
-
-    return ctx.reply(buildDecisionsDigest(msgs));
-  } catch (err) {
-    console.error('DECISIONS_ERROR:', err);
-    return ctx.reply('Watson observes:\n- Decisions were requested.\n- The record declined to cooperate. /help');
-  }
-});
-
 bot.command('help', async (ctx) => {
   const lines = [
     "Watson is an opt-in archivist. He speaks only when requested (or when /observe is enabled).",
@@ -449,3 +412,142 @@ bot.use(async (ctx, next) => {
 });
 
 
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Loose ends + decisions (self-contained; reads JSONL archive directly)
+// This avoids crashing when store helpers drift.
+////////////////////////////////////////////////////////////////////////////////
+
+function _watsonSafeText(x) {
+  if (!x) return "";
+  let s = String(x);
+  s = s.replace(/@\w+/g, "@…");
+  s = s.replace(/\b\d{7,}\b/g, "…");
+  s = s.replace(/https?:\/\/\S+/gi, "[link]");
+  s = s.replace(/\s+/g, " ").trim();
+  if (s.length > 180) s = s.slice(0, 177) + "…";
+  return s;
+}
+
+function _isCommandText(t) {
+  return typeof t === "string" && t.trim().startsWith("/");
+}
+
+async function _readRecentJsonl(chatId, limit = 250) {
+  const file = path.join(process.cwd(), "data", "chats", `${chatId}.jsonl`);
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-Math.max(limit, 50));
+    const out = [];
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        const txt = _watsonSafeText(obj?.text ?? obj?.message?.text ?? obj?.caption ?? "");
+        if (!txt) continue;
+        out.push({ text: txt });
+      } catch {}
+    }
+    return out;
+  } catch (e) {
+    // file not found or unreadable -> treat as empty archive
+    return [];
+  }
+}
+
+function _uniqLower(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const s of arr) {
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
+}
+
+function _extractLooseEnds(msgs) {
+  const pats = [
+    /\bwe should\b/i,
+    /\bwe need to\b/i,
+    /\bnext step\b/i,
+    /\btodo\b/i,
+    /\bto do\b/i,
+    /\bfollow up\b/i,
+    /\bremind me\b/i,
+    /\bcan you\b/i,
+    /\bcould you\b/i,
+    /\bplease\b/i,
+    /\blet's\b/i,
+  ];
+  const hits = [];
+  for (const m of msgs) {
+    const t = m?.text ?? "";
+    if (!t || _isCommandText(t)) continue;
+    if (pats.some(r => r.test(t))) hits.push(`"${t}"`);
+  }
+  return _uniqLower(hits).slice(0, 7);
+}
+
+function _extractDecisions(msgs) {
+  const pats = [
+    /\bdecided\b/i,
+    /\bconfirmed\b/i,
+    /\blocked in\b/i,
+    /\bwe will\b/i,
+    /\bwe're going to\b/i,
+    /\bship it\b/i,
+    /\bdone deal\b/i,
+    /\bagreed\b/i,
+    /\bfinal\b/i,
+  ];
+  const hits = [];
+  for (const m of msgs) {
+    const t = m?.text ?? "";
+    if (!t || _isCommandText(t)) continue;
+    if (pats.some(r => r.test(t))) hits.push(`"${t}"`);
+  }
+  return _uniqLower(hits).slice(0, 7);
+}
+
+bot.command("looseends", async (ctx) => {
+  try {
+    const chatId = String(ctx.chat?.id ?? "");
+    const msgs = await _readRecentJsonl(chatId, 300);
+    const items = _extractLooseEnds(msgs);
+
+    if (!items.length) {
+      return ctx.reply("Watson observes:\n- Loose ends were referenced.\n- None successfully attached.");
+    }
+
+    const lines = ["Watson observes:", "- Loose ends detected:"];
+    for (const it of items) lines.push("- " + it);
+    lines.push("- Ownership remained interpretive.");
+    return ctx.reply(lines.join("\n"));
+  } catch (err) {
+    console.error("LOOSEENDS_ERROR:", err);
+    return ctx.reply("Watson observes:\n- Loose ends were requested.\n- The archive declined to cooperate. /help");
+  }
+});
+
+bot.command("decisions", async (ctx) => {
+  try {
+    const chatId = String(ctx.chat?.id ?? "");
+    const msgs = await _readRecentJsonl(chatId, 300);
+    const items = _extractDecisions(msgs);
+
+    if (!items.length) {
+      return ctx.reply("Watson observes:\n- Decisions were discussed.\n- They did not attach.");
+    }
+
+    const lines = ["Watson observes:", "- Decisions recorded:"];
+    for (const it of items) lines.push("- " + it);
+    lines.push("- Documentation thanks you for your cooperation.");
+    return ctx.reply(lines.join("\n"));
+  } catch (err) {
+    console.error("DECISIONS_ERROR:", err);
+    return ctx.reply("Watson observes:\n- Decisions were requested.\n- The record declined comment. /help");
+  }
+});
