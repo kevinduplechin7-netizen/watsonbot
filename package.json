@@ -1,0 +1,16 @@
+{
+  "name": "watson-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Watson \u2014 Telegram group historian bot (command-based)",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "openai": "^4.0.0",
+    "telegraf": "^4.16.3"
+  }
+}
