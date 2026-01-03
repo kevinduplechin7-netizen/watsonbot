@@ -373,14 +373,6 @@ bot.command('decisions', async (ctx) => {
   }
 });
 
-bot.launch()
-  .then(() => console.log('Watson is running (free mode, long polling).'))
-  .catch((err) => console.error('Failed to launch Watson:', err));
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-
 bot.command('help', async (ctx) => {
   const lines = [
     "Watson is an opt-in archivist. He speaks only when requested (or when /observe is enabled).",
@@ -455,4 +447,5 @@ bot.use(async (ctx, next) => {
     // fail closed: no spam
   }
 });
+
 
